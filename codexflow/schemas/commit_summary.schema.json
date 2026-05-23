@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "issue", "summary", "core_logic", "tests", "risks"],
+  "properties": {
+    "title": {"type": "string"},
+    "issue": {"type": "string"},
+    "summary": {"type": "array", "items": {"type": "string"}},
+    "core_logic": {"type": "array", "items": {"type": "string"}},
+    "tests": {"type": "array", "items": {"type": "string"}},
+    "risks": {"type": "array", "items": {"type": "string"}}
+  }
+}

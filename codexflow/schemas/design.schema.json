@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_understanding",
+    "scope",
+    "target_files",
+    "implementation_plan",
+    "test_plan",
+    "risks",
+    "open_questions"
+  ],
+  "properties": {
+    "task_understanding": {"type": "string"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["in_scope", "out_of_scope"],
+      "properties": {
+        "in_scope": {"type": "array", "items": {"type": "string"}},
+        "out_of_scope": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "target_files": {"type": "array", "items": {"type": "string"}},
+    "implementation_plan": {"type": "array", "items": {"type": "string"}},
+    "test_plan": {"type": "array", "items": {"type": "string"}},
+    "risks": {"type": "array", "items": {"type": "string"}},
+    "open_questions": {"type": "array", "items": {"type": "string"}}
+  }
+}
