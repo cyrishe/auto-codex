@@ -1,7 +1,7 @@
 [project]
 name = "auto-codex"
 version = "0.1.0"
-description = "Local-first Codex CLI orchestration for GitHub Issue driven development."
+description = "Local-first Codex CLI orchestration for issue-driven development."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

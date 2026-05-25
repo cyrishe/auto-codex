@@ -8,6 +8,7 @@ import yaml
 
 
 SandboxName = Literal["read-only", "workspace-write", "danger-full-access"]
+IssueProviderName = Literal["github", "gitlab"]
 
 
 class TargetConfig(BaseModel):
@@ -24,6 +25,19 @@ class StorageConfig(BaseModel):
 
 class GitHubConfig(BaseModel):
     enabled: bool = True
+    ready_label: str = "codex:ready"
+    working_label: str = "codex:working"
+    review_label: str = "codex:review"
+    blocked_label: str = "codex:blocked"
+
+
+class IssueProviderConfig(BaseModel):
+    enabled: bool | None = None
+    provider: IssueProviderName = "github"
+    repo: str | None = None
+    host: str | None = None
+    api_url: str | None = None
+    token_env: str = "GITLAB_TOKEN"
     ready_label: str = "codex:ready"
     working_label: str = "codex:working"
     review_label: str = "codex:review"
@@ -142,6 +156,7 @@ class SafetyConfig(BaseModel):
 class CodexFlowConfig(BaseModel):
     target: TargetConfig = Field(default_factory=TargetConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    issues: IssueProviderConfig = Field(default_factory=IssueProviderConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
@@ -150,9 +165,18 @@ class CodexFlowConfig(BaseModel):
     commit: CommitConfig = Field(default_factory=CommitConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
 
+    @property
+    def issue_updates_enabled(self) -> bool:
+        return self.issues.enabled if self.issues.enabled is not None else self.github.enabled
+
+    @property
+    def issue_repo(self) -> str | None:
+        return self.issues.repo or self.target.github_repo
+
 
 DEFAULT_CONFIG_TEMPLATE = """target:
   path: "{target_path}"
+  # Legacy fallback for GitHub-only configs. Prefer issues.repo for new configs.
   github_repo: null
   base_branch: "main"
 
@@ -161,8 +185,18 @@ storage:
   db_path: ".codexflow/codexflow.db"
   worktree_dir: ".codexflow/worktrees"
 
-github:
+issues:
   enabled: true
+  # Supported: github, gitlab.
+  provider: "github"
+  # GitHub: "owner/repo"; GitLab: "group/project" or full project URL.
+  repo: null
+  # GitLab self-hosted example: "gitlab.kingdomai.com".
+  host: null
+  # Optional override. GitLab default is "https://<host>/api/v4".
+  api_url: null
+  # GitLab personal access token env var. Do not put tokens in this YAML.
+  token_env: "GITLAB_TOKEN"
   ready_label: "codex:ready"
   working_label: "codex:working"
   review_label: "codex:review"
@@ -243,6 +277,19 @@ def load_config(
 
     data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     config = CodexFlowConfig.model_validate(data)
+
+    # Backward compatibility for configs created before the generic issue
+    # provider existed.
+    if "issues" not in data:
+        config.issues.enabled = config.github.enabled
+        config.issues.ready_label = config.github.ready_label
+        config.issues.working_label = config.github.working_label
+        config.issues.review_label = config.github.review_label
+        config.issues.blocked_label = config.github.blocked_label
+    if config.issues.repo is None and config.target.github_repo:
+        config.issues.repo = config.target.github_repo
+    if config.target.github_repo is None and config.issues.provider == "github" and config.issues.repo:
+        config.target.github_repo = config.issues.repo
 
     config_dir = config_path.resolve().parent
     config.target.path = _resolve_path(config.target.path, config_dir)

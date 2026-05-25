@@ -211,7 +211,7 @@ def watch(
     config: ConfigOption = Path(".codexflow.yaml"),
     target: Annotated[Path | None, typer.Option("--target", help="Override target repository path.")] = None,
 ) -> None:
-    """Continuously poll GitHub issues and process ready work."""
+    """Continuously poll ready issues and process work."""
 
     loaded = load_config(config, target_override=target)
     pipeline = Pipeline(config=loaded)

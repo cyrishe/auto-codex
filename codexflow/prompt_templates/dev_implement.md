@@ -6,7 +6,7 @@
 2. 严格遵循已通过的设计。
 3. 不要进行无关重构。
 4. 不要修改 protected paths。
-5. 不要执行 git commit、git push、gh pr create。
+5. 不要执行 git commit、git push、创建 PR 或创建 MR。
 6. 完成后输出修改文件、实现摘要、测试或检查情况、风险。
 
 上下文：

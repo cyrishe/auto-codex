@@ -52,6 +52,36 @@ class GitHubIssue:
     def has_label(self, name: str) -> bool:
         return any(label.name == name for label in self.labels)
 
+    @classmethod
+    def from_gitlab_json(cls, payload: dict, *, comments: tuple[GitHubComment, ...] = ()) -> "GitHubIssue":
+        labels = tuple(GitHubLabel(name=str(item)) for item in payload.get("labels", []))
+        author = payload.get("author")
+        if isinstance(author, dict):
+            author = author.get("username") or author.get("name")
+        return cls(
+            number=int(payload["iid"]),
+            title=payload.get("title") or "",
+            body=payload.get("description") or "",
+            labels=labels,
+            url=payload.get("web_url"),
+            state=payload.get("state"),
+            author=author,
+            created_at=payload.get("created_at"),
+            updated_at=payload.get("updated_at"),
+            comments=comments,
+        )
+
+
+@dataclass(frozen=True)
+class PullRequestInfo:
+    url: str
+    number: int | None = None
+
+
+IssueLabel = GitHubLabel
+IssueComment = GitHubComment
+Issue = GitHubIssue
+
 
 def _parse_comment(payload: dict) -> GitHubComment:
     author = payload.get("author")

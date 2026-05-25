@@ -1,21 +1,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 import re
 
 from .command import CommandRunner
-from .models import GitHubIssue
+from .models import GitHubIssue, PullRequestInfo
 
 
 class GitHubClientError(RuntimeError):
     pass
-
-
-@dataclass(frozen=True)
-class PullRequestInfo:
-    url: str
-    number: int | None = None
 
 
 class GitHubClient:

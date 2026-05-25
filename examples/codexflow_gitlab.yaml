@@ -1,0 +1,97 @@
+# CodexFlow GitLab configuration template
+#
+# Usage:
+# 1. Copy this file to .codexflow.yaml.
+# 2. Replace every value wrapped in <...>.
+# 3. Export the token env var before running CodexFlow:
+#    export GITLAB_TOKEN="<your-token>"
+
+target:
+  # Local path to the code repository. This repo can be cloned through SSH.
+  path: ""
+  # Legacy GitHub field. Leave null when issues.provider is gitlab.
+  github_repo: null
+  # Base branch used to create codex/issue-<number> worktrees.
+  base_branch: "<base-branch>"
+
+storage:
+  runs_dir: ".codexflow/runs"
+  db_path: ".codexflow/codexflow.db"
+  worktree_dir: ".codexflow/worktrees"
+
+issues:
+  enabled: true
+  provider: "gitlab"
+  # Project path, for example "che/stock_agent".
+  # A full GitLab project URL also works, for example:
+  # "https://gitlab.kingdomai.com/che/stock_agent/-/tree/V2.0"
+  repo: "<group/project>"
+  # Self-hosted GitLab hostname.
+  host: "gitlab.kingdomai.com"
+  # Leave null unless your GitLab API URL is non-standard.
+  api_url: null
+  # Personal access token environment variable. Do not paste tokens into YAML.
+  token_env: "GITLAB_TOKEN"
+  ready_label: "codex:ready"
+  working_label: "codex:working"
+  review_label: "codex:review"
+  blocked_label: "codex:blocked"
+
+worktree:
+  enabled: true
+  cleanup_on_success: false
+
+codex:
+  developer_sandbox: "workspace-write"
+  reviewer_sandbox: "read-only"
+  max_fix_rounds: 2
+  design_timeout_seconds: 900
+  review_timeout_seconds: 600
+  implement_timeout_seconds: 1800
+  extra_args: []
+
+context:
+  max_context_chars: 120000
+  include_recent_commits: 30
+  include_issue_comments: true
+  include_related_code: true
+  related_code_max_files: 5
+  related_code_max_chars: 20000
+  include_docs_glob:
+    - "docs/**/*.md"
+    - "*.md"
+  exclude:
+    - ".git"
+    - ".codexflow"
+    - "node_modules"
+    - ".venv"
+    - "dist"
+    - "build"
+
+tests:
+  # Replace with the target repo's required evaluation command.
+  command: "<test-command>"
+  timeout_seconds: 600
+  required: true
+  fail_on_failure: true
+  allow_skipped: false
+
+commit:
+  auto_commit: true
+  # Keep false for first verification runs.
+  auto_push: false
+  create_pr: false
+  comment_on_issue: false
+  dry_run: false
+  push_remote: "origin"
+
+safety:
+  fail_on_dirty_tree: true
+  fail_on_protected_path_change: true
+  protected_paths:
+    - ".env"
+    - ".env.*"
+    - "**/*secret*"
+    - "**/*token*"
+    - "prod.yaml"
+    - "production.yaml"

@@ -7,7 +7,7 @@
 3. 不要引入无关重构。
 4. 不要修改 protected paths。
 5. 修复后可以运行必要测试。
-6. 不要执行 git commit、git push、gh pr create。
+6. 不要执行 git commit、git push、创建 PR 或创建 MR。
 
 Issue：
 

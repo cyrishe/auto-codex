@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import shlex
 import shutil
 
 from .command import CommandRunner
 from .config import CodexFlowConfig
+from .gitlab import GitLabClient, GitLabClientError
 from .gitops import GitOps
 from .locks import LockManager
 
@@ -28,18 +30,7 @@ class Doctor:
 
         checks.append(self._command_exists("git", required=True))
         checks.append(self._command_exists("codex", required=True))
-        checks.append(self._command_exists("gh", required=config.github.enabled))
-
-        if config.github.enabled and shutil.which("gh"):
-            result = self.runner.run(["gh", "auth", "status"], timeout_seconds=20)
-            checks.append(
-                DoctorCheck(
-                    name="gh auth",
-                    ok=result.ok,
-                    details="authenticated" if result.ok else result.stderr.strip() or "gh auth status failed",
-                    required=True,
-                )
-            )
+        self._issue_provider_checks(config, checks)
 
         target_path = config.target.path
         checks.append(
@@ -115,6 +106,67 @@ class Doctor:
             checks.append(DoctorCheck(name="test command", ok=ok, details=details, required=True))
 
         return checks
+
+    def _issue_provider_checks(self, config: CodexFlowConfig, checks: list[DoctorCheck]) -> None:
+        if config.issues.provider == "github":
+            checks.append(self._command_exists("gh", required=True))
+            if shutil.which("gh"):
+                result = self.runner.run(["gh", "auth", "status"], timeout_seconds=20)
+                checks.append(
+                    DoctorCheck(
+                        name="gh auth",
+                        ok=result.ok,
+                        details="authenticated" if result.ok else result.stderr.strip() or "gh auth status failed",
+                        required=True,
+                    )
+                )
+            return
+
+        if config.issues.provider == "gitlab":
+            token = os.environ.get(config.issues.token_env)
+            checks.append(
+                DoctorCheck(
+                    name="gitlab token",
+                    ok=bool(token),
+                    details=f"${config.issues.token_env}" if token else f"missing ${config.issues.token_env}",
+                    required=True,
+                )
+            )
+            if not config.issue_repo:
+                checks.append(
+                    DoctorCheck(
+                        name="gitlab repo",
+                        ok=False,
+                        details="missing issues.repo",
+                        required=True,
+                    )
+                )
+                return
+            if token:
+                try:
+                    GitLabClient(
+                        repo=config.issue_repo,
+                        host=config.issues.host,
+                        api_url=config.issues.api_url,
+                        token_env=config.issues.token_env,
+                    ).check_project()
+                    checks.append(
+                        DoctorCheck(
+                            name="gitlab project",
+                            ok=True,
+                            details=config.issue_repo,
+                            required=True,
+                        )
+                    )
+                except GitLabClientError as exc:
+                    checks.append(
+                        DoctorCheck(
+                            name="gitlab project",
+                            ok=False,
+                            details=str(exc),
+                            required=True,
+                        )
+                    )
 
     @staticmethod
     def has_failures(checks: list[DoctorCheck]) -> bool:

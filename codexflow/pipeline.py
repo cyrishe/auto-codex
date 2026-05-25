@@ -11,8 +11,8 @@ from .commit_builder import CommitBuilder, CommitSummary
 from .config import CodexFlowConfig
 from .context import ContextCollector, render_issue
 from .db import RunStore
-from .github import GitHubClient
 from .gitops import GitOps
+from .issue_provider import IssueClient, create_issue_client
 from .locks import LockManager
 from .prompts import PromptRenderer
 from .review import ReviewDecision, ReviewInterpreter
@@ -39,7 +39,7 @@ class Pipeline:
         config: CodexFlowConfig,
         store: RunStore | None = None,
         artifacts: ArtifactStore | None = None,
-        github: GitHubClient | None = None,
+        github: IssueClient | None = None,
         codex: CodexRunner | None = None,
         prompts: PromptRenderer | None = None,
         tests: TestRunner | None = None,
@@ -49,13 +49,7 @@ class Pipeline:
         self.config = config
         self.store = store or RunStore(config.storage.db_path)
         self.artifacts = artifacts or ArtifactStore(config.storage.runs_dir)
-        self.github = github or GitHubClient(
-            repo=config.target.github_repo,
-            ready_label=config.github.ready_label,
-            working_label=config.github.working_label,
-            review_label=config.github.review_label,
-            blocked_label=config.github.blocked_label,
-        )
+        self.github = github or create_issue_client(config)
         self.codex = codex or CodexRunner()
         self.prompts = prompts or PromptRenderer()
         self.tests = tests or TestRunner()
@@ -102,14 +96,14 @@ class Pipeline:
                     test_status=None,
                     code_review_summary=str(exc),
                 )
-                if self.config.github.enabled and issue_number is not None:
+                if self.config.issue_updates_enabled and issue_number is not None:
                     self.github.mark_blocked(int(issue_number))
                     self._comment_blocked(run_id, int(issue_number), str(exc))
                 self._update_meta(run_id, status="BLOCKED")
                 raise
             except Exception:
                 self.store.update_run_status(run_id, status="FAILED", current_phase="failed")
-                if self.config.github.enabled and issue_number is not None:
+                if self.config.issue_updates_enabled and issue_number is not None:
                     self.github.mark_blocked(int(issue_number))
                 self._update_meta(run_id, status="FAILED")
                 raise
@@ -138,7 +132,7 @@ class Pipeline:
                     "issue_title": issue.title,
                     "status": "PENDING",
                     "target_path": str(self.config.target.path),
-                    "github_repo": self.config.target.github_repo,
+                    "github_repo": self.config.issue_repo,
                     "base_branch": self.config.target.base_branch,
                     "work_path": str(work_path),
                     "work_branch": branch,
@@ -148,7 +142,7 @@ class Pipeline:
             self.store.create_run(
                 run_id=run_id,
                 target_repo_path=self.config.target.path,
-                github_repo=self.config.target.github_repo,
+                github_repo=self.config.issue_repo,
                 issue_number=issue.number,
                 issue_title=issue.title,
                 base_branch=self.config.target.base_branch,
@@ -160,7 +154,7 @@ class Pipeline:
             )
 
             try:
-                if self.config.github.enabled:
+                if self.config.issue_updates_enabled:
                     self.github.claim_issue(issue.number)
                 self.store.update_run_status(run_id, status="CLAIMED", current_phase="claim")
 
@@ -243,14 +237,14 @@ class Pipeline:
                     test_status=None,
                     code_review_summary=str(exc),
                 )
-                if self.config.github.enabled:
+                if self.config.issue_updates_enabled:
                     self.github.mark_blocked(issue.number)
                     self._comment_blocked(run_id, issue.number, str(exc))
                 self._update_meta(run_id, status="BLOCKED")
                 raise
             except Exception:
                 self.store.update_run_status(run_id, status="FAILED", current_phase="failed")
-                if self.config.github.enabled:
+                if self.config.issue_updates_enabled:
                     self.github.mark_blocked(issue.number)
                 self._update_meta(run_id, status="FAILED")
                 raise
@@ -826,7 +820,7 @@ class Pipeline:
             )
         if not self.config.commit.auto_commit:
             self.store.update_run_status(run_id, status="COMMIT_READY", current_phase="commit_ready")
-            if self.config.github.enabled:
+            if self.config.issue_updates_enabled:
                 self.github.mark_review(issue_number)
             self._update_meta(run_id, status="COMMIT_READY")
             return PipelineResult(run_id=run_id, status="COMMIT_READY", run_dir=run_dir)
@@ -866,7 +860,7 @@ class Pipeline:
             test_status=test_status,
             code_review_summary=code_review_summary,
         )
-        if self.config.github.enabled:
+        if self.config.issue_updates_enabled:
             self.github.mark_review(issue_number)
         self._update_meta(run_id, status="DONE", final_sha=final_sha)
         return PipelineResult(run_id=run_id, status="DONE", run_dir=run_dir, commit_sha=final_sha)
