@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS runs (
   status TEXT NOT NULL,
   current_phase TEXT,
   fix_round INTEGER DEFAULT 0,
+  user_review_status TEXT,
+  user_feedback_path TEXT,
+  user_reviewed_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -90,6 +93,19 @@ class RunStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._ensure_columns(conn)
+
+    @staticmethod
+    def _ensure_columns(conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+        migrations = {
+            "user_review_status": "TEXT",
+            "user_feedback_path": "TEXT",
+            "user_reviewed_at": "TEXT",
+        }
+        for name, definition in migrations.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -169,6 +185,32 @@ class RunStore:
             conn.execute(
                 f"UPDATE runs SET {', '.join(assignments)} WHERE id = ?",
                 values,
+            )
+
+    def update_user_review(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        feedback_path: Path | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET user_review_status = ?,
+                    user_feedback_path = ?,
+                    user_reviewed_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    str(feedback_path) if feedback_path else None,
+                    utc_now(),
+                    utc_now(),
+                    run_id,
+                ),
             )
 
     def record_artifact(
@@ -287,6 +329,47 @@ class RunStore:
                 ),
             )
 
+    def list_artifacts(self, run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT kind, path, sha256, created_at
+                FROM artifacts
+                WHERE run_id = ?
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_review(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT phase, verdict, score, risk_level, summary, details_path, created_at
+                FROM reviews
+                WHERE run_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def latest_commit(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT commit_sha, commit_message_path, diff_path, test_summary, created_at
+                FROM commits
+                WHERE run_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def list_runs(self, *, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -295,6 +378,44 @@ class RunStore:
                        created_at, updated_at
                 FROM runs
                 ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_pending_user_reviews(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                  runs.id,
+                  runs.issue_number,
+                  runs.issue_title,
+                  runs.status,
+                  runs.current_phase,
+                  runs.work_branch,
+                  runs.worktree_path,
+                  runs.final_sha,
+                  runs.user_review_status,
+                  runs.updated_at,
+                  commits.test_summary,
+                  reviews.summary AS review_summary
+                FROM runs
+                LEFT JOIN commits ON commits.id = (
+                  SELECT id FROM commits
+                  WHERE commits.run_id = runs.id
+                  ORDER BY id DESC
+                  LIMIT 1
+                )
+                LEFT JOIN reviews ON reviews.id = (
+                  SELECT id FROM reviews
+                  WHERE reviews.run_id = runs.id
+                  ORDER BY id DESC
+                  LIMIT 1
+                )
+                WHERE runs.user_review_status = 'PENDING_USER_REVIEW'
+                ORDER BY runs.updated_at DESC
                 LIMIT ?
                 """,
                 (limit,),

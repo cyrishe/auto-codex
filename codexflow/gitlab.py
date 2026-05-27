@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from .models import GitHubComment, GitHubIssue, PullRequestInfo
+from .models import GitHubComment, GitHubIssue, IssueCreateInfo, PullRequestInfo
 
 
 class GitLabClientError(RuntimeError):
@@ -126,6 +126,20 @@ class GitLabClient:
             f"projects/{self._project_id()}/issues/{number}/notes",
             data={"body": body},
         )
+
+    def create_issue(self, *, title: str, body_file: str, labels: list[str] | None = None) -> IssueCreateInfo:
+        body = Path(body_file).read_text(encoding="utf-8")
+        data = {"title": title, "description": body}
+        if labels:
+            data["labels"] = ",".join(labels)
+        payload = self._request_json(
+            "POST",
+            f"projects/{self._project_id()}/issues",
+            data=data,
+        )
+        url = payload.get("web_url") or payload.get("url") or ""
+        iid = payload.get("iid")
+        return IssueCreateInfo(url=url, number=int(iid) if iid is not None else None)
 
     def check_project(self) -> None:
         self._request_json("GET", f"projects/{self._project_id()}")

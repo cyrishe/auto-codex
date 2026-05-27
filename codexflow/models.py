@@ -78,6 +78,12 @@ class PullRequestInfo:
     number: int | None = None
 
 
+@dataclass(frozen=True)
+class IssueCreateInfo:
+    url: str
+    number: int | None = None
+
+
 IssueLabel = GitHubLabel
 IssueComment = GitHubComment
 Issue = GitHubIssue

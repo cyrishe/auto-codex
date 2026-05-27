@@ -4,7 +4,7 @@ import json
 import re
 
 from .command import CommandRunner
-from .models import GitHubIssue, PullRequestInfo
+from .models import GitHubIssue, IssueCreateInfo, PullRequestInfo
 
 
 class GitHubClientError(RuntimeError):
@@ -108,6 +108,16 @@ class GitHubClient:
         command = self._gh_base() + ["issue", "comment", str(number), "--body-file", body_file]
         result = self.runner.run(command, timeout_seconds=30)
         self._raise_on_failure(result.stderr, result.ok)
+
+    def create_issue(self, *, title: str, body_file: str, labels: list[str] | None = None) -> IssueCreateInfo:
+        command = self._gh_base() + ["issue", "create", "--title", title, "--body-file", body_file]
+        for label in labels or []:
+            command.extend(["--label", label])
+        result = self.runner.run(command, timeout_seconds=30)
+        self._raise_on_failure(result.stderr, result.ok)
+        url = result.stdout.strip().splitlines()[-1]
+        match = re.search(r"/issues/(\d+)(?:$|[/?#])", url)
+        return IssueCreateInfo(url=url, number=int(match.group(1)) if match else None)
 
     def _gh_base(self) -> list[str]:
         command = ["gh"]

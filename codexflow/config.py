@@ -52,6 +52,8 @@ class WorktreeConfig(BaseModel):
 class CodexConfig(BaseModel):
     developer_sandbox: SandboxName = "workspace-write"
     reviewer_sandbox: SandboxName = "read-only"
+    prompt_templates_dir: Path | None = None
+    max_design_rounds: int = 1
     max_fix_rounds: int = 2
     design_timeout_seconds: int = 900
     review_timeout_seconds: int = 600
@@ -63,6 +65,13 @@ class CodexConfig(BaseModel):
     def validate_max_fix_rounds(cls, value: int) -> int:
         if value < 0:
             raise ValueError("max_fix_rounds must be >= 0")
+        return value
+
+    @field_validator("max_design_rounds")
+    @classmethod
+    def validate_max_design_rounds(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("max_design_rounds must be >= 0")
         return value
 
     @field_validator("design_timeout_seconds", "review_timeout_seconds", "implement_timeout_seconds")
@@ -209,6 +218,9 @@ worktree:
 codex:
   developer_sandbox: "workspace-write"
   reviewer_sandbox: "read-only"
+  # Optional directory with user-editable prompt templates.
+  prompt_templates_dir: null
+  max_design_rounds: 1
   max_fix_rounds: 2
   design_timeout_seconds: 900
   review_timeout_seconds: 600
@@ -300,6 +312,8 @@ def load_config(
     config.storage.runs_dir = _resolve_path(config.storage.runs_dir, target_root)
     config.storage.db_path = _resolve_path(config.storage.db_path, target_root)
     config.storage.worktree_dir = _resolve_path(config.storage.worktree_dir, target_root)
+    if config.codex.prompt_templates_dir is not None:
+        config.codex.prompt_templates_dir = _resolve_path(config.codex.prompt_templates_dir, config_dir)
     return config
 
 

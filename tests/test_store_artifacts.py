@@ -23,6 +23,27 @@ def test_run_store_initializes_and_records_run(tmp_path: Path) -> None:
     assert run["current_phase"] == "context"
 
 
+def test_run_store_lists_pending_user_reviews(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "codexflow.db")
+    store.initialize()
+    store.create_run(
+        run_id="run-1",
+        target_repo_path=tmp_path,
+        issue_number=123,
+        issue_title="Add feature",
+        base_branch="main",
+        work_branch="codex/issue-123",
+    )
+    store.update_run_status("run-1", status="DONE", current_phase="done", final_sha="abc123")
+    store.update_user_review("run-1", status="PENDING_USER_REVIEW")
+
+    rows = store.list_pending_user_reviews()
+
+    assert rows[0]["id"] == "run-1"
+    assert rows[0]["issue_number"] == 123
+    assert rows[0]["final_sha"] == "abc123"
+
+
 def test_artifact_store_creates_run_dir_and_json(tmp_path: Path) -> None:
     artifacts = ArtifactStore(tmp_path / "runs")
     run_id = generate_run_id(123)

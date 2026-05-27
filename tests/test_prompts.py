@@ -42,3 +42,19 @@ def test_prompt_renderer_writes_rendered_prompt(tmp_path: Path) -> None:
 
     assert output.exists()
     assert "passed" in output.read_text(encoding="utf-8")
+
+
+def test_prompt_renderer_uses_user_template_directory(tmp_path: Path) -> None:
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "dev_design.md").write_text("Custom {{ISSUE}} {{CONTEXT}}", encoding="utf-8")
+
+    rendered = PromptRenderer(templates_dir=templates).render(
+        "dev_design",
+        {
+            "CONTEXT": "context",
+            "ISSUE": "issue",
+        },
+    )
+
+    assert "Custom issue context" in rendered.content

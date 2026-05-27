@@ -15,6 +15,7 @@ from .gitops import GitOps
 from .issue_provider import IssueClient, create_issue_client
 from .locks import LockManager
 from .prompts import PromptRenderer
+from .report import write_user_report
 from .review import ReviewDecision, ReviewInterpreter
 from .secret_filter import SecretFilter
 from .test_runner import TestResult, TestRunner
@@ -51,7 +52,7 @@ class Pipeline:
         self.artifacts = artifacts or ArtifactStore(config.storage.runs_dir)
         self.github = github or create_issue_client(config)
         self.codex = codex or CodexRunner()
-        self.prompts = prompts or PromptRenderer()
+        self.prompts = prompts or PromptRenderer(templates_dir=config.codex.prompt_templates_dir)
         self.tests = tests or TestRunner()
         self.reviews = reviews or ReviewInterpreter()
         self.commits = commits or CommitBuilder()
@@ -87,6 +88,7 @@ class Pipeline:
                 return self._resume_validated_run(run, run_dir, work_path)
             except PipelineBlocked as exc:
                 self.store.update_run_status(run_id, status="BLOCKED", current_phase="blocked")
+                self.store.update_user_review(run_id, status="PENDING_USER_REVIEW")
                 self._write_run_summary(
                     run_id,
                     status="BLOCKED",
@@ -96,6 +98,7 @@ class Pipeline:
                     test_status=None,
                     code_review_summary=str(exc),
                 )
+                self._write_user_report(run_id)
                 if self.config.issue_updates_enabled and issue_number is not None:
                     self.github.mark_blocked(int(issue_number))
                     self._comment_blocked(run_id, int(issue_number), str(exc))
@@ -177,20 +180,12 @@ class Pipeline:
                 self._record_artifact(run_id, "context", context_path)
                 self.store.update_run_status(run_id, status="CONTEXT_COLLECTED", current_phase="context")
 
-                design_path = self._codex_design(run_id, work_path, issue_path, context_path)
-                design_review_path = self._codex_design_review(run_id, work_path, issue_path, context_path, design_path)
-                design_decision = self.reviews.interpret_file(design_review_path)
-                self.store.record_review(
-                    run_id=run_id,
-                    phase="design_review",
-                    verdict=design_decision.verdict,
-                    score=design_decision.output.score,
-                    risk_level=design_decision.output.risk_level,
-                    summary=design_decision.output.summary,
-                    details_path=design_review_path,
+                design_path, design_review_path = self._design_review_loop(
+                    run_id,
+                    work_path,
+                    issue_path,
+                    context_path,
                 )
-                if not design_decision.can_continue:
-                    raise PipelineBlocked(f"Design review verdict: {design_decision.verdict}")
                 self.store.update_run_status(run_id, status="DESIGN_REVIEWED", current_phase="design_review")
 
                 implement_summary_path = self._codex_implement(
@@ -228,6 +223,7 @@ class Pipeline:
                 )
             except PipelineBlocked as exc:
                 self.store.update_run_status(run_id, status="BLOCKED", current_phase="blocked")
+                self.store.update_user_review(run_id, status="PENDING_USER_REVIEW")
                 self._write_run_summary(
                     run_id,
                     status="BLOCKED",
@@ -237,6 +233,7 @@ class Pipeline:
                     test_status=None,
                     code_review_summary=str(exc),
                 )
+                self._write_user_report(run_id)
                 if self.config.issue_updates_enabled:
                     self.github.mark_blocked(issue.number)
                     self._comment_blocked(run_id, issue.number, str(exc))
@@ -295,6 +292,7 @@ class Pipeline:
         if status not in {
             "CONTEXT_COLLECTED",
             "DEV_DESIGN_DONE",
+            "DESIGN_FIXING",
             "DESIGN_REVIEWED",
             "IMPLEMENTED",
             "TESTED",
@@ -308,30 +306,30 @@ class Pipeline:
         context_path = _require_artifact(run_dir, "00_context.md")
         work_git = GitOps(work_path)
 
-        if status == "CONTEXT_COLLECTED":
-            design_path = self._codex_design(run_id, work_path, issue_path, context_path)
-            status = "DEV_DESIGN_DONE"
-        else:
-            design_path = _require_artifact(run_dir, "01_dev_design.output.json")
-
-        if status == "DEV_DESIGN_DONE":
-            design_review_path = self._codex_design_review(run_id, work_path, issue_path, context_path, design_path)
-            design_decision = self.reviews.interpret_file(design_review_path)
-            self.store.record_review(
-                run_id=run_id,
-                phase="design_review",
-                verdict=design_decision.verdict,
-                score=design_decision.output.score,
-                risk_level=design_decision.output.risk_level,
-                summary=design_decision.output.summary,
-                details_path=design_review_path,
+        if status in {"CONTEXT_COLLECTED", "DEV_DESIGN_DONE", "DESIGN_FIXING"}:
+            latest_design = _latest_rounded_artifact(run_dir, "01_dev_design", ".output.json")
+            latest_review = (
+                _latest_rounded_artifact(run_dir, "02_review_design", ".output.json")
+                if status == "DESIGN_FIXING"
+                else None
             )
-            if not design_decision.can_continue:
-                raise PipelineBlocked(f"Design review verdict: {design_decision.verdict}")
+            design_path, design_review_path = self._design_review_loop(
+                run_id,
+                work_path,
+                issue_path,
+                context_path,
+                existing_design=latest_design,
+                existing_review=latest_review,
+            )
             self.store.update_run_status(run_id, status="DESIGN_REVIEWED", current_phase="design_review")
             status = "DESIGN_REVIEWED"
         else:
-            design_review_path = _require_artifact(run_dir, "02_review_design.output.json")
+            latest_design = _latest_rounded_artifact(run_dir, "01_dev_design", ".output.json")
+            latest_review = _latest_rounded_artifact(run_dir, "02_review_design", ".output.json")
+            if latest_design is None or latest_review is None:
+                raise PipelineBlocked("Design artifacts are missing")
+            _, design_path = latest_design
+            _, design_review_path = latest_review
 
         if status == "DESIGN_REVIEWED":
             implementation_summary_path = self._codex_implement(
@@ -470,9 +468,84 @@ class Pipeline:
 
         raise PipelineBlocked(f"Run status is not resumable: {status}")
 
-    def _codex_design(self, run_id: str, work_path: Path, issue_path: Path, context_path: Path) -> Path:
-        prompt_path = self.artifacts.run_dir(run_id) / "01_dev_design.prompt.md"
-        output_path = self.artifacts.run_dir(run_id) / "01_dev_design.output.json"
+    def _design_review_loop(
+        self,
+        run_id: str,
+        work_path: Path,
+        issue_path: Path,
+        context_path: Path,
+        *,
+        existing_design: tuple[int, Path] | None = None,
+        existing_review: tuple[int, Path] | None = None,
+    ) -> tuple[Path, Path]:
+        if existing_design is None:
+            round_number = 1
+            design_path = self._codex_design(run_id, work_path, issue_path, context_path, round_number=round_number)
+        else:
+            round_number, design_path = existing_design
+
+        while True:
+            if existing_review is not None and existing_review[0] == round_number:
+                design_review_path = existing_review[1]
+                existing_review = None
+            else:
+                design_review_path = self._codex_design_review(
+                    run_id,
+                    work_path,
+                    issue_path,
+                    context_path,
+                    design_path,
+                    round_number=round_number,
+                )
+            design_decision = self.reviews.interpret_file(design_review_path)
+            self.store.record_review(
+                run_id=run_id,
+                phase="design_review" if round_number == 1 else f"design_review.round{round_number}",
+                verdict=design_decision.verdict,
+                score=design_decision.output.score,
+                risk_level=design_decision.output.risk_level,
+                summary=design_decision.output.summary,
+                details_path=design_review_path,
+            )
+            if design_decision.can_continue:
+                return design_path, design_review_path
+            if design_decision.blocked:
+                raise PipelineBlocked(f"Design review verdict: blocked - {design_decision.output.summary}")
+            if round_number > self.config.codex.max_design_rounds:
+                raise PipelineBlocked(
+                    f"Design review verdict after {self.config.codex.max_design_rounds} design fix rounds: "
+                    f"{design_decision.verdict} - {design_decision.output.summary}"
+                )
+
+            next_round = round_number + 1
+            self.store.update_run_status(
+                run_id,
+                status="DESIGN_FIXING",
+                current_phase=f"dev_design_fix_round{next_round}",
+                fix_round=round_number,
+            )
+            design_path = self._codex_design_fix(
+                run_id,
+                work_path,
+                issue_path,
+                context_path,
+                previous_design_path=design_path,
+                design_review_path=design_review_path,
+                round_number=next_round,
+            )
+            round_number = next_round
+
+    def _codex_design(
+        self,
+        run_id: str,
+        work_path: Path,
+        issue_path: Path,
+        context_path: Path,
+        *,
+        round_number: int = 1,
+    ) -> Path:
+        prompt_path = self.artifacts.run_dir(run_id) / _round_name("01_dev_design.prompt.md", round_number)
+        output_path = self.artifacts.run_dir(run_id) / _round_name("01_dev_design.output.json", round_number)
         _ensure_missing(prompt_path)
         _ensure_missing(output_path)
         prompt_path = self.prompts.render_to_file(
@@ -489,11 +562,54 @@ class Pipeline:
             extra_args=self.config.codex.extra_args,
             timeout_seconds=self.config.codex.design_timeout_seconds,
         )
-        self._record_codex_step(run_id, "dev_design", "developer", result)
+        phase = "dev_design" if round_number == 1 else f"dev_design.round{round_number}"
+        self._record_codex_step(run_id, phase, "developer", result)
         if not result.ok:
             raise PipelineBlocked("Developer design failed")
-        self._record_artifact(run_id, "design", output_path)
-        self.store.update_run_status(run_id, status="DEV_DESIGN_DONE", current_phase="dev_design")
+        self._record_artifact(run_id, "design" if round_number == 1 else f"design_round{round_number}", output_path)
+        self.store.update_run_status(run_id, status="DEV_DESIGN_DONE", current_phase=phase)
+        return output_path
+
+    def _codex_design_fix(
+        self,
+        run_id: str,
+        work_path: Path,
+        issue_path: Path,
+        context_path: Path,
+        *,
+        previous_design_path: Path,
+        design_review_path: Path,
+        round_number: int,
+    ) -> Path:
+        prompt_path = self.artifacts.run_dir(run_id) / _round_name("01_dev_design.prompt.md", round_number)
+        output_path = self.artifacts.run_dir(run_id) / _round_name("01_dev_design.output.json", round_number)
+        _ensure_missing(prompt_path)
+        _ensure_missing(output_path)
+        prompt_path = self.prompts.render_to_file(
+            "dev_design_fix",
+            {
+                "CONTEXT": context_path.read_text(encoding="utf-8"),
+                "ISSUE": issue_path.read_text(encoding="utf-8"),
+                "PREVIOUS_DESIGN_JSON": previous_design_path.read_text(encoding="utf-8"),
+                "DESIGN_REVIEW_JSON": design_review_path.read_text(encoding="utf-8"),
+            },
+            prompt_path,
+        )
+        result = self.codex.run(
+            cwd=work_path,
+            prompt_path=prompt_path,
+            output_path=output_path,
+            sandbox="read-only",
+            schema_path=schema_path("design.schema.json"),
+            extra_args=self.config.codex.extra_args,
+            timeout_seconds=self.config.codex.design_timeout_seconds,
+        )
+        phase = f"dev_design_fix.round{round_number}"
+        self._record_codex_step(run_id, phase, "developer", result)
+        if not result.ok:
+            raise PipelineBlocked(f"Developer design fix round {round_number} failed")
+        self._record_artifact(run_id, f"design_round{round_number}", output_path)
+        self.store.update_run_status(run_id, status="DEV_DESIGN_DONE", current_phase=phase)
         return output_path
 
     def _codex_design_review(
@@ -503,9 +619,11 @@ class Pipeline:
         issue_path: Path,
         context_path: Path,
         design_path: Path,
+        *,
+        round_number: int = 1,
     ) -> Path:
-        prompt_path = self.artifacts.run_dir(run_id) / "02_review_design.prompt.md"
-        output_path = self.artifacts.run_dir(run_id) / "02_review_design.output.json"
+        prompt_path = self.artifacts.run_dir(run_id) / _round_name("02_review_design.prompt.md", round_number)
+        output_path = self.artifacts.run_dir(run_id) / _round_name("02_review_design.output.json", round_number)
         _ensure_missing(prompt_path)
         _ensure_missing(output_path)
         prompt_path = self.prompts.render_to_file(
@@ -526,10 +644,15 @@ class Pipeline:
             extra_args=self.config.codex.extra_args,
             timeout_seconds=self.config.codex.review_timeout_seconds,
         )
-        self._record_codex_step(run_id, "review_design", "reviewer", result)
+        phase = "review_design" if round_number == 1 else f"review_design.round{round_number}"
+        self._record_codex_step(run_id, phase, "reviewer", result)
         if not result.ok:
             raise PipelineBlocked("Design review failed")
-        self._record_artifact(run_id, "design_review", output_path)
+        self._record_artifact(
+            run_id,
+            "design_review" if round_number == 1 else f"design_review_round{round_number}",
+            output_path,
+        )
         return output_path
 
     def _codex_implement(
@@ -820,6 +943,7 @@ class Pipeline:
             )
         if not self.config.commit.auto_commit:
             self.store.update_run_status(run_id, status="COMMIT_READY", current_phase="commit_ready")
+            self.store.update_user_review(run_id, status="PENDING_USER_REVIEW")
             if self.config.issue_updates_enabled:
                 self.github.mark_review(issue_number)
             self._update_meta(run_id, status="COMMIT_READY")
@@ -848,6 +972,7 @@ class Pipeline:
             test_status=test_status,
             code_review_summary=code_review_summary,
         )
+        self._write_user_report(run_id)
         self._publish_after_commit(
             run_id,
             run_dir,
@@ -862,6 +987,8 @@ class Pipeline:
         )
         if self.config.issue_updates_enabled:
             self.github.mark_review(issue_number)
+        if not self.config.commit.auto_push:
+            self.store.update_user_review(run_id, status="PENDING_USER_REVIEW")
         self._update_meta(run_id, status="DONE", final_sha=final_sha)
         return PipelineResult(run_id=run_id, status="DONE", run_dir=run_dir, commit_sha=final_sha)
 
@@ -897,6 +1024,12 @@ class Pipeline:
         path.write_text(content, encoding="utf-8")
         self._record_artifact(run_id, "run_summary", path)
         return path
+
+    def _write_user_report(self, run_id: str) -> Path:
+        path = self.artifacts.run_dir(run_id) / "15_user_report.md"
+        if path.exists():
+            return path
+        return write_user_report(store=self.store, artifacts=self.artifacts, run_id=run_id)
 
     def _publish_after_commit(
         self,
@@ -1172,6 +1305,11 @@ def _ensure_missing(path: Path) -> None:
 
 
 def _latest_artifact(run_dir: Path, prefix: str, suffix: str) -> Path | None:
+    latest = _latest_rounded_artifact(run_dir, prefix, suffix)
+    return latest[1] if latest else None
+
+
+def _latest_rounded_artifact(run_dir: Path, prefix: str, suffix: str) -> tuple[int, Path] | None:
     candidates: list[tuple[int, Path]] = []
     base = run_dir / f"{prefix}{suffix}"
     if base.exists():
@@ -1182,7 +1320,7 @@ def _latest_artifact(run_dir: Path, prefix: str, suffix: str) -> Path | None:
             candidates.append((int(marker), path))
     if not candidates:
         return None
-    return max(candidates, key=lambda item: item[0])[1]
+    return max(candidates, key=lambda item: item[0])
 
 
 def _test_result_from_log(path: Path, *, command: str | None) -> TestResult:

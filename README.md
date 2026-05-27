@@ -42,6 +42,7 @@ Templates are available in `examples/`:
 - `codexflow_task.md`: GitHub issue template.
 - `AGENTS.md`: target-repo coding rules template.
 - `review_evaluation_template.md`: review and evaluation criteria template.
+- `feedback_template.md`: user feedback template for reject/follow-up issues.
 - `codexflow_gitlab.yaml`: GitLab `.codexflow.yaml` template.
 
 ## Issue Providers

@@ -141,3 +141,29 @@ def test_comment_issue_uses_body_file() -> None:
         "--body-file",
         ".codexflow/comment.md",
     )
+
+
+def test_create_issue_parses_url_and_labels() -> None:
+    runner = FakeRunner([command_result(["gh"], stdout="https://github.com/owner/repo/issues/42\n")])
+
+    issue = GitHubClient(runner=runner, repo="owner/repo").create_issue(
+        title="Follow up",
+        body_file=".codexflow/feedback.md",
+        labels=["codex:ready"],
+    )
+
+    assert issue.url.endswith("/issues/42")
+    assert issue.number == 42
+    assert runner.calls[0] == (
+        "gh",
+        "--repo",
+        "owner/repo",
+        "issue",
+        "create",
+        "--title",
+        "Follow up",
+        "--body-file",
+        ".codexflow/feedback.md",
+        "--label",
+        "codex:ready",
+    )

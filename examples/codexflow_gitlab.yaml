@@ -44,6 +44,9 @@ worktree:
 codex:
   developer_sandbox: "workspace-write"
   reviewer_sandbox: "read-only"
+  # Optional directory with user-editable prompt templates.
+  prompt_templates_dir: null
+  max_design_rounds: 1
   max_fix_rounds: 2
   design_timeout_seconds: 900
   review_timeout_seconds: 600

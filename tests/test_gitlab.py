@@ -115,6 +115,33 @@ def test_gitlab_create_merge_request_and_comment_issue(tmp_path: Path) -> None:
     )
 
 
+def test_gitlab_create_issue(tmp_path: Path) -> None:
+    calls = []
+    body = tmp_path / "issue.md"
+    body.write_text("feedback body", encoding="utf-8")
+
+    def requester(method, path, params, data):
+        calls.append((method, path, params, data))
+        return {"web_url": "https://gitlab.kingdomai.com/che/stock_agent/-/issues/8", "iid": 8}
+
+    issue = GitLabClient(
+        repo="che/stock_agent",
+        host="gitlab.kingdomai.com",
+        requester=requester,
+        token="token",
+    ).create_issue(title="Feedback", body_file=str(body), labels=["codex:ready"])
+
+    assert issue.number == 8
+    assert calls == [
+        (
+            "POST",
+            "projects/che%2Fstock_agent/issues",
+            None,
+            {"title": "Feedback", "description": "feedback body", "labels": "codex:ready"},
+        )
+    ]
+
+
 def test_gitlab_requires_host_or_api_url_for_relative_repo() -> None:
     with pytest.raises(GitLabClientError, match="host or issues.api_url"):
         GitLabClient(repo="che/stock_agent", token="token")

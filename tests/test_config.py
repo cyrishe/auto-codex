@@ -19,6 +19,8 @@ def test_write_and_load_default_config(tmp_path: Path) -> None:
     assert config.issues.enabled is True
     assert config.storage.runs_dir == target / ".codexflow" / "runs"
     assert config.codex.reviewer_sandbox == "read-only"
+    assert config.codex.prompt_templates_dir is None
+    assert config.codex.max_design_rounds == 1
     assert config.codex.design_timeout_seconds == 900
     assert config.codex.review_timeout_seconds == 600
     assert config.codex.implement_timeout_seconds == 1800
@@ -55,6 +57,25 @@ github:
     assert config.issue_repo == "owner/repo"
     assert config.issue_updates_enabled is False
     assert config.issues.ready_label == "ready"
+
+
+def test_prompt_templates_dir_resolves_relative_to_config(tmp_path: Path) -> None:
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    config_path = tmp_path / ".codexflow.yaml"
+    config_path.write_text(
+        """
+target:
+  path: "."
+codex:
+  prompt_templates_dir: "templates"
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.codex.prompt_templates_dir == templates.resolve()
 
 
 def test_write_default_config_refuses_overwrite(tmp_path: Path) -> None:

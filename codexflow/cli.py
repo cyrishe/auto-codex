@@ -12,8 +12,11 @@ from .artifacts import ArtifactStore
 from .config import load_config, write_default_config
 from .db import RunStore
 from .doctor import Doctor
+from .issue_provider import create_issue_client
 from .locks import LockManager
 from .pipeline import Pipeline, PipelineBlocked
+from .report import write_user_report
+from .secret_filter import SecretFilter
 
 
 app = typer.Typer(no_args_is_help=True, help="CodexFlow local Codex orchestration CLI.")
@@ -126,6 +129,202 @@ def show_run(
         raise typer.Exit(code=1)
     for key, value in run.items():
         console.print(f"[bold]{key}[/bold]: {value}")
+
+
+@app.command("pending-review")
+def pending_review(
+    config: ConfigOption = Path(".codexflow.yaml"),
+    limit: Annotated[int, typer.Option("--limit", min=1, help="Maximum pending runs to show.")] = 50,
+) -> None:
+    """Show local results waiting for user review."""
+
+    loaded = load_config(config)
+    store = RunStore(loaded.storage.db_path)
+    if not loaded.storage.db_path.exists():
+        console.print("[yellow]No CodexFlow database found.[/yellow]")
+        return
+
+    rows = store.list_pending_user_reviews(limit=limit)
+    if not rows:
+        console.print("[yellow]No runs pending user review.[/yellow]")
+        return
+
+    table = Table(title="Pending User Review")
+    table.add_column("Run ID")
+    table.add_column("Issue")
+    table.add_column("Status")
+    table.add_column("Branch")
+    table.add_column("Commit")
+    table.add_column("Tests")
+    table.add_column("Summary")
+    for row in rows:
+        issue = f"#{row['issue_number']}" if row["issue_number"] is not None else "-"
+        table.add_row(
+            row["id"],
+            issue,
+            row["status"],
+            row["work_branch"] or "-",
+            (row["final_sha"] or "-")[:12],
+            row["test_summary"] or "-",
+            row["review_summary"] or "-",
+        )
+    console.print(table)
+
+
+@app.command()
+def approve(
+    run_id: str,
+    config: ConfigOption = Path(".codexflow.yaml"),
+) -> None:
+    """Mark a run as user-approved without pushing by default."""
+
+    loaded = load_config(config)
+    store = RunStore(loaded.storage.db_path)
+    run = store.get_run(run_id) if loaded.storage.db_path.exists() else None
+    if run is None:
+        console.print(f"[red]Run not found:[/red] {run_id}")
+        raise typer.Exit(code=1)
+    store.update_user_review(run_id, status="USER_APPROVED")
+    console.print(f"[green]Approved[/green] {run_id}")
+
+
+@app.command()
+def reject(
+    run_id: str,
+    feedback_file: Annotated[Path, typer.Option("--feedback-file", help="Markdown file with user feedback.")],
+    config: ConfigOption = Path(".codexflow.yaml"),
+) -> None:
+    """Mark a run as rejected and attach user feedback."""
+
+    loaded = load_config(config)
+    store = RunStore(loaded.storage.db_path)
+    run = store.get_run(run_id) if loaded.storage.db_path.exists() else None
+    if run is None:
+        console.print(f"[red]Run not found:[/red] {run_id}")
+        raise typer.Exit(code=1)
+    if not feedback_file.exists():
+        console.print(f"[red]Feedback file not found:[/red] {feedback_file}")
+        raise typer.Exit(code=1)
+
+    artifact_store = ArtifactStore(loaded.storage.runs_dir)
+    target = artifact_store.run_dir(run_id) / "16_user_feedback.md"
+    content = feedback_file.read_text(encoding="utf-8")
+    content = SecretFilter(
+        exclude_patterns=loaded.context.exclude,
+        protected_patterns=loaded.safety.protected_paths,
+    ).redact_text(content)
+    target.write_text(content, encoding="utf-8")
+    store.record_artifact(
+        run_id=run_id,
+        kind="user_feedback",
+        path=target,
+        sha256=ArtifactStore.sha256_file(target),
+    )
+    store.update_user_review(run_id, status="USER_REJECTED", feedback_path=target)
+    console.print(f"[yellow]Rejected[/yellow] {run_id}")
+    console.print(f"Feedback: {target}")
+
+
+@app.command("report")
+def report_command(
+    run_id: Annotated[str | None, typer.Argument(help="Run ID to report.")] = None,
+    pending: Annotated[bool, typer.Option("--pending", help="Report all runs pending user review.")] = False,
+    config: ConfigOption = Path(".codexflow.yaml"),
+) -> None:
+    """Generate or show user-facing run reports."""
+
+    loaded = load_config(config)
+    store = RunStore(loaded.storage.db_path)
+    artifacts = ArtifactStore(loaded.storage.runs_dir)
+    if not loaded.storage.db_path.exists():
+        console.print("[yellow]No CodexFlow database found.[/yellow]")
+        return
+
+    if pending:
+        rows = store.list_pending_user_reviews()
+        if not rows:
+            console.print("[yellow]No runs pending user review.[/yellow]")
+            return
+        table = Table(title="Pending Reports")
+        table.add_column("Run ID")
+        table.add_column("Issue")
+        table.add_column("Report")
+        for row in rows:
+            path = write_user_report(store=store, artifacts=artifacts, run_id=row["id"])
+            issue = f"#{row['issue_number']}" if row["issue_number"] is not None else "-"
+            table.add_row(row["id"], issue, str(path))
+        console.print(table)
+        return
+
+    if run_id is None:
+        console.print("[red]Provide a run_id or use --pending.[/red]")
+        raise typer.Exit(code=1)
+    if store.get_run(run_id) is None:
+        console.print(f"[red]Run not found:[/red] {run_id}")
+        raise typer.Exit(code=1)
+    path = write_user_report(store=store, artifacts=artifacts, run_id=run_id)
+    console.print(f"Report: {path}")
+
+
+@app.command()
+def feedback(
+    run_id: str,
+    feedback_file: Annotated[Path, typer.Option("--feedback-file", help="Markdown file with user feedback.")],
+    ready: Annotated[bool, typer.Option("--ready", help="Add the ready label to the new issue.")] = False,
+    config: ConfigOption = Path(".codexflow.yaml"),
+) -> None:
+    """Create a follow-up issue from user feedback."""
+
+    loaded = load_config(config)
+    store = RunStore(loaded.storage.db_path)
+    if not loaded.storage.db_path.exists():
+        console.print("[yellow]No CodexFlow database found.[/yellow]")
+        raise typer.Exit(code=1)
+    run = store.get_run(run_id)
+    if run is None:
+        console.print(f"[red]Run not found:[/red] {run_id}")
+        raise typer.Exit(code=1)
+    if not feedback_file.exists():
+        console.print(f"[red]Feedback file not found:[/red] {feedback_file}")
+        raise typer.Exit(code=1)
+
+    artifact_store = ArtifactStore(loaded.storage.runs_dir)
+    report_path = artifact_store.run_dir(run_id) / "15_user_report.md"
+    feedback_text = feedback_file.read_text(encoding="utf-8")
+    feedback_text = SecretFilter(
+        exclude_patterns=loaded.context.exclude,
+        protected_patterns=loaded.safety.protected_paths,
+    ).redact_text(feedback_text)
+    body_path = artifact_store.run_dir(run_id) / "17_feedback_issue.md"
+    body = "\n".join(
+        [
+            f"# Follow-up feedback for CodexFlow run `{run_id}`",
+            "",
+            f"Original issue: `#{run['issue_number']}` {run.get('issue_title') or ''}".rstrip(),
+            f"Original commit: `{run.get('final_sha') or 'not committed'}`",
+            f"Run directory: `{artifact_store.run_dir(run_id)}`",
+            f"User report: `{report_path}`",
+            "",
+            "## User Feedback",
+            "",
+            feedback_text.strip(),
+            "",
+        ]
+    )
+    body_path.write_text(body, encoding="utf-8")
+    store.record_artifact(
+        run_id=run_id,
+        kind="feedback_issue_body",
+        path=body_path,
+        sha256=ArtifactStore.sha256_file(body_path),
+    )
+    labels = [loaded.issues.ready_label] if ready else []
+    created = create_issue_client(loaded).create_issue(
+        title=f"Feedback for issue #{run['issue_number']}: {run.get('issue_title') or run_id}",
+        body_file=str(body_path),
+        labels=labels,
+    )
+    console.print(f"[green]Created feedback issue[/green] {created.url}")
 
 
 @app.command("run-issue")

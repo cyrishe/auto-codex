@@ -5,7 +5,7 @@ from typing import Protocol
 from .config import CodexFlowConfig
 from .github import GitHubClient
 from .gitlab import GitLabClient
-from .models import GitHubIssue, PullRequestInfo
+from .models import GitHubIssue, IssueCreateInfo, PullRequestInfo
 
 
 class IssueClient(Protocol):
@@ -24,6 +24,8 @@ class IssueClient(Protocol):
     def create_pr(self, *, base: str, head: str, title: str, body_file: str) -> PullRequestInfo: ...
 
     def comment_issue(self, number: int, *, body_file: str) -> None: ...
+
+    def create_issue(self, *, title: str, body_file: str, labels: list[str] | None = None) -> IssueCreateInfo: ...
 
 
 def create_issue_client(config: CodexFlowConfig) -> IssueClient:

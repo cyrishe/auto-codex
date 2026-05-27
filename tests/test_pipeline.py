@@ -182,6 +182,63 @@ class FixingCodex:
         )
 
 
+class DesignFixingCodex:
+    def __init__(self, *, design_review_verdicts: list[str]) -> None:
+        self.design_review_verdicts = list(design_review_verdicts)
+        self.calls: list[Path] = []
+        self.prompts: dict[str, str] = {}
+
+    def run(
+        self,
+        *,
+        cwd: Path,
+        prompt_path: Path,
+        output_path: Path,
+        sandbox: str,
+        schema_path: Path | None = None,
+        json_stream_path: Path | None = None,
+        extra_args: list[str] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> CodexResult:
+        self.calls.append(output_path)
+        self.prompts[output_path.name] = prompt_path.read_text(encoding="utf-8")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.name.startswith("01_dev_design"):
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "task_understanding": f"Design from {output_path.name}",
+                        "scope": {"in_scope": ["feature file"], "out_of_scope": []},
+                        "target_files": ["feature.txt"],
+                        "implementation_plan": ["Create feature.txt"],
+                        "test_plan": ["test -f feature.txt"],
+                        "risks": [],
+                        "open_questions": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif output_path.name.startswith("02_review_design"):
+            verdict = self.design_review_verdicts.pop(0) if self.design_review_verdicts else "pass"
+            output_path.write_text(_review_json(verdict), encoding="utf-8")
+        elif output_path.name == "03_dev_implement.final.md":
+            (cwd / "feature.txt").write_text("implemented after design fix\n", encoding="utf-8")
+            output_path.write_text("Created feature.txt", encoding="utf-8")
+            if json_stream_path:
+                json_stream_path.write_text('{"event":"done"}\n', encoding="utf-8")
+        elif output_path.name == "06_review_code.output.json":
+            output_path.write_text(_review_json("pass"), encoding="utf-8")
+        else:
+            raise AssertionError(f"Unexpected codex output path: {output_path}")
+        return CodexResult(
+            command_result=command_result(["codex", "fake"], cwd=cwd),
+            prompt_path=prompt_path,
+            output_path=output_path,
+            schema_path=schema_path,
+            json_stream_path=json_stream_path,
+        )
+
+
 class SecretArtifactCodex(FakeCodex):
     def run(self, **kwargs) -> CodexResult:
         result = super().run(**kwargs)
@@ -228,6 +285,9 @@ def test_pipeline_run_issue_happy_path(tmp_path: Path) -> None:
     assert (run / "10_final_commit_summary.json").exists()
     assert (run / "11_commit_message.txt").exists()
     assert (run / "14_run_summary.md").exists()
+    report = (run / "15_user_report.md").read_text(encoding="utf-8")
+    assert "Recommendation" in report
+    assert "建议人工审查后接纳" in report
 
 
 def test_pipeline_blocks_on_code_review_needs_fix(tmp_path: Path) -> None:
@@ -316,6 +376,42 @@ def test_pipeline_fixes_code_review_needs_fix(tmp_path: Path) -> None:
     assert "broken" in fix_prompt
     assert "status: pass" in fix_prompt
     assert _review_phases(config.storage.db_path) == ["design_review", "code_review", "code_review.round2"]
+
+
+def test_pipeline_fixes_design_review_needs_fix(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    config = _config(tmp_path, repo, max_design_rounds=1)
+    github = FakeGitHub(GitHubIssue(number=123, title="Add feature", body="## Goal\nCreate feature.txt"))
+    codex = DesignFixingCodex(design_review_verdicts=["needs_fix", "pass"])
+
+    result = Pipeline(config=config, github=github, codex=codex).run_issue(123)
+
+    assert result.status == "DONE"
+    assert (result.run_dir / "01_dev_design.output.json").exists()
+    assert (result.run_dir / "01_dev_design.round2.output.json").exists()
+    assert (result.run_dir / "02_review_design.output.json").exists()
+    assert (result.run_dir / "02_review_design.round2.output.json").exists()
+    fix_prompt = codex.prompts["01_dev_design.round2.output.json"]
+    assert "PREVIOUS_DESIGN_JSON" not in fix_prompt
+    assert "Design from 01_dev_design.output.json" in fix_prompt
+    assert "Needs fix" in fix_prompt
+    assert "Fix it" in fix_prompt
+    assert _review_phases(config.storage.db_path) == ["design_review", "design_review.round2", "code_review"]
+
+
+def test_pipeline_blocks_after_design_fix_round_limit(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    config = _config(tmp_path, repo, max_design_rounds=0)
+    github = FakeGitHub(GitHubIssue(number=123, title="Add feature", body="## Goal\nCreate feature.txt"))
+
+    with pytest.raises(PipelineBlocked, match="Design review verdict after 0 design fix rounds"):
+        Pipeline(
+            config=config,
+            github=github,
+            codex=DesignFixingCodex(design_review_verdicts=["needs_fix"]),
+        ).run_issue(123)
+
+    assert github.blocked == [123]
 
 
 def test_pipeline_respects_auto_commit_false(tmp_path: Path) -> None:
@@ -426,6 +522,7 @@ def _config(
     allow_skipped: bool = False,
     auto_commit: bool = True,
     max_fix_rounds: int = 2,
+    max_design_rounds: int = 1,
     auto_push: bool = False,
     create_pr: bool = False,
     comment_on_issue: bool = False,
@@ -440,7 +537,7 @@ def _config(
         ),
         github=GitHubConfig(enabled=True),
         worktree=WorktreeConfig(enabled=True),
-        codex=CodexConfig(max_fix_rounds=max_fix_rounds),
+        codex=CodexConfig(max_fix_rounds=max_fix_rounds, max_design_rounds=max_design_rounds),
         tests=CodexTestConfig(
             command=test_command,
             timeout_seconds=30,
